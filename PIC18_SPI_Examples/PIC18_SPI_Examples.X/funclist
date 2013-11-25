@@ -1,0 +1,13 @@
+_Read_Multiple_SPI_Bytes: CODE, 15874 0 28
+_OpenSPI: CODE, 16154 0 80
+_Read_SPI_StatusReg: CODE, 15902 0 28
+_getsSPI: CODE, 15846 0 28
+_main: CODE, 16234 0 4294967152
+_Write_SPI_Page: CODE, 16044 0 46
+_Write_SPI_Byte: CODE, 16090 0 64
+__initialization: CODE, 15966 0 32
+_putsSPI: CODE, 15930 0 36
+_WriteSPI: CODE, 15822 0 24
+_ReadSPI: CODE, 15790 0 14
+_Read_SPI_Byte: CODE, 16004 0 40
+Total: 276

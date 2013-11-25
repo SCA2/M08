@@ -1,0 +1,612 @@
+
+# 1 "../../M16/DEE Emulation 16-bit.c"
+
+# 105 "../../M16/DEE Emulation 16-bit.h"
+typedef union
+{
+unsigned char val;
+struct
+{
+unsigned addrNotFound:1;
+unsigned expiredPage:1;
+unsigned packBeforePageFull:1;
+unsigned packBeforeInit:1;
+unsigned packSkipped:1;
+unsigned IllegalAddress:1;
+unsigned pageCorrupt:1;
+unsigned writeError:1;
+};
+} DATA_EE_FLAGS;
+
+extern DATA_EE_FLAGS dataEEFlags;
+
+extern int ReadPMHigh(int);
+extern int ReadPMLow(int);
+extern void UnlockPM(void);
+extern int WritePMHigh(int, int);
+extern int WritePMHighB(int, int);
+extern int WritePMLow(int, int);
+extern int WritePMLowB(int, int);
+
+void UnlockWrite (void);
+int GetPageStatus (unsigned char bank, unsigned volatile char page, unsigned volatile char field);
+void ErasePage (unsigned char bank, unsigned char page);
+char IncEWCount (unsigned char *index);
+unsigned int GetNextAvailCount (unsigned char bank);
+int PackEE (unsigned char bank);
+unsigned char DataEEInit (void);
+unsigned int DataEERead (unsigned int addr);
+unsigned char DataEEWrite (unsigned int data, unsigned int addr);
+
+# 101 "../../M16/DEE Emulation 16-bit.c"
+DATA_EE_FLAGS dataEEFlags;
+
+# 116
+unsigned char emulationPages[2 * 3][512 * 2]
+__attribute__ ((space(psv), aligned(512 * 2), noload));
+
+# 148
+void UnlockWrite(void)
+{
+unsigned int sh_SR;
+
+SET_AND_SAVE_CPU_IPL(sh_SR, 7);
+
+UnlockPM();
+
+RESTORE_CPU_IPL(sh_SR);
+
+return;
+}
+
+# 172
+int GetPageStatus(unsigned char bank, unsigned char page, unsigned char field)
+{
+unsigned int statusOffset;
+unsigned char statusByte;
+unsigned char status;
+int savedTBLPAG;
+
+savedTBLPAG = TBLPAG;
+
+
+TBLPAG = ((((((unsigned long)__builtin_tblpage(&emulationPages)) << 16) + __builtin_tbloffset(&emulationPages)) + ((sizeof(emulationPages[0])*3) * (bank)) + ((sizeof(emulationPages[0])) * (page))) >> 16);
+statusOffset = ((((((unsigned long)__builtin_tblpage(&emulationPages)) << 16) + __builtin_tbloffset(&emulationPages)) + ((sizeof(emulationPages[0])*3) * (bank)) + ((sizeof(emulationPages[0])) * (page))) & 0xFFFF);
+
+statusByte = (ReadPMHigh(statusOffset) & 0xFF);
+
+switch(field)
+{
+case 18:
+status = ((statusByte & 4) >> 2);
+break;
+case 19:
+status = ((statusByte & 8) >> 3);
+break;
+case 20:
+status = ((statusByte & 16) >> 4);
+break;
+default:
+status = 0;
+break;
+}
+
+TBLPAG = savedTBLPAG;
+
+return(status);
+}
+
+# 217
+void ErasePage(unsigned char bank, unsigned char page)
+{
+unsigned int pmOffset;
+int savedTBLPAG;
+
+savedTBLPAG = TBLPAG;
+
+
+TBLPAG = ((((((unsigned long)__builtin_tblpage(&emulationPages)) << 16) + __builtin_tbloffset(&emulationPages)) + ((sizeof(emulationPages[0])*3) * (bank)) + ((sizeof(emulationPages[0])) * (page))) >> 16);
+
+NVMCON = 0x4042;
+
+pmOffset = ((((((unsigned long)__builtin_tblpage(&emulationPages)) << 16) + __builtin_tbloffset(&emulationPages)) + ((sizeof(emulationPages[0])*3) * (bank)) + ((sizeof(emulationPages[0])) * (page))) & 0xFFFF);
+
+WritePMLow(pmOffset, pmOffset);
+
+UnlockWrite();
+
+TBLPAG = savedTBLPAG;
+
+return;
+}
+
+# 255
+unsigned int GetNextAvailCount(unsigned char bank)
+{
+int i = 0;
+int currentPage;
+unsigned char dataEEval;
+unsigned int pmOffset;
+int savedTBLPAG;
+
+savedTBLPAG = TBLPAG;
+
+
+for (currentPage = 0;
+(currentPage < 3) &&
+(GetPageStatus(bank, currentPage, 19) == 1);
+currentPage++) {}
+
+TBLPAG = ((((((unsigned long)__builtin_tblpage(&emulationPages)) << 16) + __builtin_tbloffset(&emulationPages)) + ((sizeof(emulationPages[0])*3) * (bank)) + ((sizeof(emulationPages[0])) * (currentPage))) >> 16);
+pmOffset = ((((((unsigned long)__builtin_tblpage(&emulationPages)) << 16) + __builtin_tbloffset(&emulationPages)) + ((sizeof(emulationPages[0])*3) * (bank)) + ((sizeof(emulationPages[0])) * (currentPage))) & 0xFFFF);
+
+do
+{
+i+=2;
+pmOffset += 2;
+
+dataEEval = (ReadPMHigh(pmOffset) & 0xFF);
+}
+while ((i<512 * 2) && (dataEEval != 0xFF));
+
+if(i == 512 * 2)
+{
+i = 0;
+}
+
+TBLPAG = savedTBLPAG;
+
+return(i);
+}
+
+# 310
+int PackEE(unsigned char bank)
+{
+int currentPage;
+int packedPage;
+int savedTBLPAG;
+int currentOffset;
+int packedOffset;
+int i;
+unsigned char latchAddr;
+unsigned int latchData;
+unsigned char dataEEFlags_sh;
+
+savedTBLPAG = TBLPAG;
+
+
+for (currentPage = 0;
+(currentPage < 3) &&
+(GetPageStatus(bank, currentPage, 19) == 1);
+currentPage++) {}
+
+
+if (currentPage == 3)
+{
+TBLPAG = savedTBLPAG;
+dataEEFlags.packBeforeInit = 1;
+return(3);
+}
+else
+{
+
+packedPage = currentPage + 1;
+if (packedPage == 3)
+{
+packedPage = 0;
+}
+while(GetPageStatus(bank, packedPage, 20) == 0)
+{
+packedPage++;
+if (packedPage == 3)
+{
+packedPage = 0;
+}
+if(packedPage == currentPage)
+{
+TBLPAG = savedTBLPAG;
+dataEEFlags.expiredPage = 1;
+return(1);
+}
+}
+}
+
+
+TBLPAG = ((((((unsigned long)__builtin_tblpage(&emulationPages)) << 16) + __builtin_tbloffset(&emulationPages)) + ((sizeof(emulationPages[0])*3) * (bank)) + ((sizeof(emulationPages[0])) * (packedPage))) >> 16);
+packedOffset = ((((((unsigned long)__builtin_tblpage(&emulationPages)) << 16) + __builtin_tbloffset(&emulationPages)) + ((sizeof(emulationPages[0])*3) * (bank)) + ((sizeof(emulationPages[0])) * (packedPage))) & 0xFFFF);
+
+if(GetNextAvailCount(bank))
+{
+dataEEFlags.packBeforePageFull = 1;
+}
+
+dataEEFlags_sh = dataEEFlags.val;
+dataEEFlags.addrNotFound = 0;
+i = 0;
+NVMCON = 0x4001;
+
+WritePMLow(0xFFFF, packedOffset);
+WritePMHigh(0xFF, packedOffset);
+packedOffset += 2;
+
+latchAddr = 0;
+i++;
+
+do
+{
+while((latchAddr != 255) && (i < 64))
+{
+latchData = DataEERead((255 * bank) + latchAddr);
+if(dataEEFlags.addrNotFound)
+{
+dataEEFlags.addrNotFound = 0;
+}
+else
+{
+WritePMLow(latchData, packedOffset);
+WritePMHigh(latchAddr, packedOffset);
+packedOffset += 2;
+i++;
+}
+latchAddr++;
+while((latchAddr == 255) && (i < 64))
+{
+WritePMLow(0xFFFF, packedOffset);
+WritePMHigh(0xFF, packedOffset);
+packedOffset += 2;
+i++;
+}
+}
+UnlockWrite();
+i = 0;
+}
+while(latchAddr != 255);
+
+dataEEFlags.val = dataEEFlags_sh;
+
+
+
+
+TBLPAG = ((((((unsigned long)__builtin_tblpage(&emulationPages)) << 16) + __builtin_tbloffset(&emulationPages)) + ((sizeof(emulationPages[0])*3) * (bank)) + ((sizeof(emulationPages[0])) * (packedPage))) >> 16);
+packedOffset = ((((((unsigned long)__builtin_tblpage(&emulationPages)) << 16) + __builtin_tbloffset(&emulationPages)) + ((sizeof(emulationPages[0])*3) * (bank)) + ((sizeof(emulationPages[0])) * (packedPage))) & 0xFFFF) + 2;
+
+latchAddr = ReadPMHigh(packedOffset++);
+latchData = ReadPMLow(packedOffset++);
+
+while(latchAddr != 0xFF)
+{
+if(DataEERead((255 * bank) + latchAddr) != latchData)
+{
+TBLPAG = savedTBLPAG;
+dataEEFlags.writeError = 1;
+return(7);
+}
+latchAddr = ReadPMHigh(packedOffset++);
+latchData = ReadPMLow(packedOffset++);
+}
+
+
+
+currentOffset = ((((((unsigned long)__builtin_tblpage(&emulationPages)) << 16) + __builtin_tbloffset(&emulationPages)) + ((sizeof(emulationPages[0])*3) * (bank)) + ((sizeof(emulationPages[0])) * (currentPage))) & 0xFFFF);
+packedOffset = ((((((unsigned long)__builtin_tblpage(&emulationPages)) << 16) + __builtin_tbloffset(&emulationPages)) + ((sizeof(emulationPages[0])*3) * (bank)) + ((sizeof(emulationPages[0])) * (packedPage))) & 0xFFFF);
+
+
+TBLPAG = ((((((unsigned long)__builtin_tblpage(&emulationPages)) << 16) + __builtin_tbloffset(&emulationPages)) + ((sizeof(emulationPages[0])*3) * (bank)) + ((sizeof(emulationPages[0])) * (currentPage))) >> 16);
+latchData = ReadPMLow(currentOffset);
+latchAddr = ReadPMHigh(currentOffset);
+if(packedPage == 0)
+{
+latchData++;
+}
+
+if (latchData >= 5 - 1)
+{
+dataEEFlags.expiredPage = 1;
+latchAddr &= 0b11101111;
+}
+
+
+TBLPAG = ((((((unsigned long)__builtin_tblpage(&emulationPages)) << 16) + __builtin_tbloffset(&emulationPages)) + ((sizeof(emulationPages[0])*3) * (bank)) + ((sizeof(emulationPages[0])) * (packedPage))) >> 16);
+WritePMHigh(latchAddr, packedOffset);
+WritePMLow(latchData, packedOffset);
+
+NVMCON = 0x4003;
+UnlockWrite();
+
+if((latchAddr != ReadPMHigh(packedOffset)) ||
+(latchData != ReadPMLow(packedOffset)))
+{
+TBLPAG = savedTBLPAG;
+dataEEFlags.writeError = 1;
+return(7);
+}
+
+
+ErasePage(bank, currentPage);
+
+TBLPAG = savedTBLPAG;
+return(dataEEFlags.expiredPage);
+}
+
+# 494
+unsigned char DataEEInit(void)
+{
+unsigned char pageCnt;
+unsigned char erasePage;
+unsigned int savedTBLPAG;
+unsigned int currentPage;
+unsigned int statusOffset;
+int packedPage;
+unsigned char bank;
+
+savedTBLPAG = TBLPAG;
+
+
+TBLPAG = ((((((unsigned long)__builtin_tblpage(&emulationPages)) << 16) + __builtin_tbloffset(&emulationPages)) + ((sizeof(emulationPages[0])*3) * (0)) + ((sizeof(emulationPages[0])) * (0))) >> 16);
+
+for(bank = 0; bank < 2; bank++)
+{
+pageCnt = 0;
+erasePage = 0;
+packedPage = 0;
+
+
+for (currentPage = 0;
+(currentPage < 3) &&
+(GetPageStatus(bank, currentPage, 20) == 0);
+currentPage++) {}
+
+if (currentPage == 3)
+{
+TBLPAG = savedTBLPAG;
+dataEEFlags.expiredPage = 1;
+return(1);
+}
+
+
+for (currentPage = 0; currentPage < 3; currentPage++)
+{
+if(GetPageStatus(bank, currentPage, 19) == 0)
+{
+pageCnt++;
+}
+}
+
+
+if(pageCnt == 0)
+{
+ErasePage(bank, 0);
+
+
+TBLPAG = ((((((unsigned long)__builtin_tblpage(&emulationPages)) << 16) + __builtin_tbloffset(&emulationPages)) + ((sizeof(emulationPages[0])*3) * (bank)) + ((sizeof(emulationPages[0])) * (0))) >> 16);
+statusOffset = ((((((unsigned long)__builtin_tblpage(&emulationPages)) << 16) + __builtin_tbloffset(&emulationPages)) + ((sizeof(emulationPages[0])*3) * (bank)) + ((sizeof(emulationPages[0])) * (0))) & 0xFFFF);
+
+NVMCON = 0x4003;
+
+WritePMLow(0, statusOffset);
+WritePMHigh(0xF3, statusOffset);
+UnlockWrite();
+
+TBLPAG = savedTBLPAG;
+continue;
+}
+
+else if(pageCnt == 1)
+{
+TBLPAG = savedTBLPAG;
+continue;
+}
+
+else if(pageCnt == 2)
+{
+if((GetPageStatus(bank, 3 - 1, 19) == 0) &&
+(GetPageStatus(bank, 0, 19) == 0))
+{
+currentPage = 3 - 1;
+erasePage = 0;
+}
+else
+{
+currentPage = 0;
+while((GetPageStatus(bank, currentPage, 19) == 1) &&
+(currentPage < 3))
+{
+currentPage++;
+}
+erasePage = currentPage + 1;
+if (erasePage == 3)
+{
+erasePage = 0;
+}
+}
+ErasePage(bank, erasePage);
+
+if(!GetNextAvailCount(bank))
+{
+PackEE(bank);
+}
+TBLPAG = savedTBLPAG;
+continue;
+}
+else
+{
+TBLPAG = savedTBLPAG;
+dataEEFlags.pageCorrupt = 1;
+return(6);
+}
+}
+return(0);
+}
+
+# 618
+unsigned int DataEERead(unsigned int addr)
+{
+unsigned int savedTBLPAG;
+unsigned int currentPage;
+unsigned int pmOffset;
+unsigned int latch;
+unsigned int i;
+unsigned char bank;
+
+if(addr >= (2 * 255))
+{
+dataEEFlags.IllegalAddress = 1;
+return(0xFFFF);
+}
+
+bank = addr / 255;
+
+savedTBLPAG = TBLPAG;
+
+
+for (currentPage = 0;
+(currentPage < 3) &&
+(GetPageStatus(bank, currentPage, 19) == 1);
+currentPage++) {}
+
+if (currentPage == 3)
+{
+TBLPAG = savedTBLPAG;
+dataEEFlags.pageCorrupt = 1;
+return(0xFFFF);
+}
+
+
+TBLPAG = ((((((unsigned long)__builtin_tblpage(&emulationPages)) << 16) + __builtin_tbloffset(&emulationPages)) + ((sizeof(emulationPages[0])*3) * (bank)) + ((sizeof(emulationPages[0])) * (currentPage))) >> 16);
+pmOffset = ((((((unsigned long)__builtin_tblpage(&emulationPages)) << 16) + __builtin_tbloffset(&emulationPages)) + ((sizeof(emulationPages[0])*3) * (bank)) + ((sizeof(emulationPages[0])) * ((currentPage + 1)))) & 0xFFFF) - 2;
+
+i=512;
+
+do
+{
+latch = ReadPMHigh(pmOffset);
+pmOffset -= 2;
+
+i--;
+}
+while((i > 0) && (latch != (addr % 255)));
+
+if(!i)
+{
+dataEEFlags.addrNotFound = 1;
+TBLPAG = savedTBLPAG;
+return(0xFFFF);
+}
+
+pmOffset += 2;
+latch = ReadPMLow(pmOffset);
+
+TBLPAG = savedTBLPAG;
+return(latch);
+}
+
+# 698
+unsigned char DataEEWrite(unsigned int data, unsigned int addr)
+{
+int savedTBLPAG;
+int currentPage;
+int pmOffset;
+unsigned int nextLoc;
+volatile unsigned char latch;
+unsigned char dataEEFlags_sh;
+unsigned int bank;
+
+if(addr >= (2 * 255))
+{
+dataEEFlags.IllegalAddress = 1;
+return(5);
+}
+
+bank = addr / 255;
+
+savedTBLPAG = TBLPAG;
+NVMCON = 0x4003;
+
+
+for (currentPage = 0;
+(currentPage < 3) &&
+(GetPageStatus(bank, currentPage, 19) == 1);
+currentPage++) {}
+
+if (currentPage == 3)
+{
+TBLPAG = savedTBLPAG;
+dataEEFlags.pageCorrupt = 1;
+return(6);
+}
+
+
+TBLPAG = ((((((unsigned long)__builtin_tblpage(&emulationPages)) << 16) + __builtin_tbloffset(&emulationPages)) + ((sizeof(emulationPages[0])*3) * (bank)) + ((sizeof(emulationPages[0])) * (currentPage))) >> 16);
+pmOffset = ((((((unsigned long)__builtin_tblpage(&emulationPages)) << 16) + __builtin_tbloffset(&emulationPages)) + ((sizeof(emulationPages[0])*3) * (bank)) + ((sizeof(emulationPages[0])) * (currentPage))) & 0xFFFF);
+
+dataEEFlags_sh = dataEEFlags.val;
+
+
+if(DataEERead(addr) == data)
+{
+if(dataEEFlags.addrNotFound == 0)
+{
+TBLPAG = savedTBLPAG;
+dataEEFlags.val = dataEEFlags_sh;
+return(0);
+}
+}
+
+dataEEFlags.val = dataEEFlags_sh;
+nextLoc = GetNextAvailCount(bank);
+
+if(!nextLoc)
+{
+TBLPAG = savedTBLPAG;
+dataEEFlags.packSkipped = 1;
+return(4);
+}
+
+pmOffset = pmOffset + nextLoc;
+
+WritePMLow(data, pmOffset);
+WritePMHigh((addr % 255), pmOffset);
+
+UnlockWrite();
+
+Nop();
+Nop();
+
+latch = (ReadPMLow(pmOffset) & 0xFF);
+
+if(latch != (data & 0xFF))
+{
+TBLPAG = savedTBLPAG;
+dataEEFlags.writeError = 1;
+return(7);
+}
+
+latch = (ReadPMHigh(pmOffset) & 0xFF);
+
+if(latch != (addr % 255))
+{
+TBLPAG = savedTBLPAG;
+dataEEFlags.writeError = 1;
+return(7);
+}
+
+pmOffset += 1;
+latch = ((ReadPMLow(pmOffset) >> 8) & 0xFF);
+
+if(latch != ((data >> 8) & 0xFF))
+{
+TBLPAG = savedTBLPAG;
+dataEEFlags.writeError = 1;
+return(7);
+}
+
+
+if ((nextLoc + 2) == ((512) * 2))
+{
+PackEE(bank);
+}
+
+TBLPAG = savedTBLPAG;
+
+return(0);
+}
